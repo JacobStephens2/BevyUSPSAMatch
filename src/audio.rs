@@ -18,6 +18,8 @@ pub enum Sfx {
     Paper,
     Penalty,
     Clear,
+    Reload,
+    Empty,
 }
 
 #[derive(Resource)]
@@ -28,6 +30,8 @@ pub struct AudioAssets {
     paper: Handle<AudioSource>,
     penalty: Handle<AudioSource>,
     clear: Handle<AudioSource>,
+    reload: Handle<AudioSource>,
+    empty: Handle<AudioSource>,
     pub music: Handle<AudioSource>,
 }
 
@@ -40,6 +44,8 @@ impl AudioAssets {
             Sfx::Paper => self.paper.clone(),
             Sfx::Penalty => self.penalty.clone(),
             Sfx::Clear => self.clear.clone(),
+            Sfx::Reload => self.reload.clone(),
+            Sfx::Empty => self.empty.clone(),
         }
     }
 }
@@ -53,6 +59,8 @@ pub fn build_audio_assets(sources: &mut Assets<AudioSource>) -> AudioAssets {
         paper: mk(paper()),
         penalty: mk(penalty()),
         clear: mk(clear()),
+        reload: mk(reload()),
+        empty: mk(empty()),
         music: mk(music()),
     }
 }
@@ -209,6 +217,26 @@ fn penalty() -> Vec<f32> {
         }
         buf[i] = env * s * 0.3;
     }
+    buf
+}
+
+/// Reload: a magazine seat "thunk" then a slide "cha-chunk".
+fn reload() -> Vec<f32> {
+    let mut buf = vec![0.0; dur(0.42)];
+    noise_burst(&mut buf, 0, 0.07, 0.5, 0.6, 55.0); // mag seated
+    add_tone(&mut buf, 0, 150.0, 0.07, 0.4, 50.0);
+    add_tone(&mut buf, dur(0.18), 1400.0, 0.05, 0.4, 70.0); // slide back
+    noise_burst(&mut buf, dur(0.18), 0.04, 0.3, 0.2, 90.0);
+    add_tone(&mut buf, dur(0.28), 900.0, 0.06, 0.5, 60.0); // slide forward clack
+    noise_burst(&mut buf, dur(0.28), 0.04, 0.4, 0.15, 90.0);
+    buf
+}
+
+/// Dry-fire on an empty chamber: a single sharp click.
+fn empty() -> Vec<f32> {
+    let mut buf = vec![0.0; dur(0.05)];
+    add_tone(&mut buf, 0, 2400.0, 0.03, 0.4, 120.0);
+    noise_burst(&mut buf, 0, 0.03, 0.4, 0.1, 130.0);
     buf
 }
 

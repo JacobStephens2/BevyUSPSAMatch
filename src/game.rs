@@ -22,6 +22,10 @@ const PAPERS: usize = 5;
 const STEEL: usize = 3;
 const NOSHOOTS: usize = 2;
 
+/// Rounds per magazine and how long a reload takes (counted against stage time).
+pub const MAG_SIZE: u32 = 10;
+const RELOAD_TIME: f32 = 1.8;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TKind {
     Paper,
@@ -153,6 +157,9 @@ pub struct Match {
     pub stage_num: u32,
     pub result: Option<Score>,
     pub status: String,
+    pub ammo: u32,
+    pub reloading: bool,
+    pub reload_left: f32,
     pub pending: Vec<Sfx>,
     /// Set when a new layout needs its meshes (re)spawned.
     pub rebuild: bool,
@@ -171,6 +178,9 @@ impl Match {
             stage_num: 1,
             result: None,
             status: "MAKE READY, wait for the buzzer, then move and shoot.".into(),
+            ammo: MAG_SIZE,
+            reloading: false,
+            reload_left: 0.0,
             pending: Vec::new(),
             rebuild: true,
             clear_marks: false,
@@ -205,6 +215,9 @@ impl Match {
         self.result = None;
         self.shots = 0;
         self.elapsed = 0.0;
+        self.ammo = MAG_SIZE;
+        self.reloading = false;
+        self.reload_left = 0.0;
         self.wait_left = rand::thread_rng().gen_range(1.5..3.5);
         self.phase = Phase::Waiting;
         self.status = "Stand by…".into();
@@ -223,7 +236,14 @@ impl Match {
                 }
             }
             Phase::Running => {
-                self.elapsed += dt;
+                self.elapsed += dt; // reload time counts against the clock
+                if self.reloading {
+                    self.reload_left -= dt;
+                    if self.reload_left <= 0.0 {
+                        self.reloading = false;
+                        self.ammo = MAG_SIZE;
+                    }
+                }
                 if self.targets.iter().all(|t| t.satisfied()) {
                     self.score();
                 }
@@ -232,10 +252,30 @@ impl Match {
         }
     }
 
+    /// Whether a shot can be fired right now (running, loaded, not reloading).
+    pub fn can_fire(&self) -> bool {
+        self.phase == Phase::Running && !self.reloading && self.ammo > 0
+    }
+
+    /// Begin a reload (only useful while running and not already full/reloading).
+    pub fn reload(&mut self) {
+        if self.phase == Phase::Running && !self.reloading && self.ammo < MAG_SIZE {
+            self.reloading = true;
+            self.reload_left = RELOAD_TIME;
+            self.pending.push(Sfx::Reload);
+        }
+    }
+
+    /// Dry-fire click when the trigger is pulled on an empty chamber.
+    pub fn dry_fire(&mut self) {
+        self.pending.push(Sfx::Empty);
+    }
+
     /// Fire a ray from `origin` along `dir`; update scoring and return where to
     /// draw the bullet hole.
     pub fn shoot(&mut self, origin: Vec3, dir: Vec3) -> ShotResult {
         self.shots += 1;
+        self.ammo = self.ammo.saturating_sub(1);
         self.pending.push(Sfx::Shot);
 
         let mut best: Option<(usize, f32, Vec2)> = None;

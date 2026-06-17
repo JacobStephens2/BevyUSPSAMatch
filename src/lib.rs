@@ -16,7 +16,7 @@ use bevy::audio::{AudioSource, Volume};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use game::{Match, Phase, Score, TKind};
+use game::{MAG_SIZE, Match, Phase, Score, TKind};
 
 const EYE_H: f32 = 1.6;
 const MOVE_SPEED: f32 = 4.2;
@@ -58,6 +58,7 @@ enum HudKind {
     Shots,
     Remain,
     Status,
+    Ammo,
 }
 #[derive(Component)]
 struct HudLabel(HudKind);
@@ -76,6 +77,7 @@ enum Btn {
     Stop,
     Next,
     Fire,
+    Reload,
 }
 #[derive(Component)]
 struct BtnLabel(Btn);
@@ -275,6 +277,7 @@ fn build_hud(commands: &mut Commands, font: &Handle<Font>) {
     hud_text(commands, font, "Shots: 0", 22.0, Color::WHITE, -510.0, 392.0, HudLabel(HudKind::Shots));
     hud_text(commands, font, "", 22.0, Color::WHITE, 510.0, 392.0, HudLabel(HudKind::Remain));
     hud_text(commands, font, "", 21.0, Color::srgb(1.0, 0.96, 0.8), 0.0, 352.0, HudLabel(HudKind::Status));
+    hud_text(commands, font, "", 26.0, Color::srgb(1.0, 0.93, 0.6), 250.0, -250.0, HudLabel(HudKind::Ammo));
 
     // Crosshair (two thin bars).
     hud_sprite(commands, Color::srgb(0.95, 0.95, 0.95), Vec2::new(26.0, 3.0), Vec2::ZERO, 10.0, ());
@@ -284,8 +287,9 @@ fn build_hud(commands: &mut Commands, font: &Handle<Font>) {
     spawn_button(commands, font, Btn::Ready, Vec2::new(MATCH_BTN_XS[0], MATCH_BTN_Y), Vec2::new(BTN_W, BTN_H));
     spawn_button(commands, font, Btn::Stop, Vec2::new(MATCH_BTN_XS[1], MATCH_BTN_Y), Vec2::new(BTN_W, BTN_H));
     spawn_button(commands, font, Btn::Next, Vec2::new(MATCH_BTN_XS[2], MATCH_BTN_Y), Vec2::new(BTN_W, BTN_H));
-    // FIRE button.
+    // FIRE button + RELOAD button (above it).
     spawn_button(commands, font, Btn::Fire, FIRE_POS, Vec2::new(FIRE_R * 2.0, FIRE_R * 2.0));
+    spawn_button(commands, font, Btn::Reload, Vec2::new(FIRE_POS.x, -110.0), Vec2::new(190.0, 54.0));
 
     // Move joystick (hidden until touched).
     hud_sprite(commands, Color::srgba(1.0, 1.0, 1.0, 0.12), Vec2::splat(JOY_R * 2.0), JOY_CENTER, 9.0, JoyBase);
@@ -294,7 +298,7 @@ fn build_hud(commands: &mut Commands, font: &Handle<Font>) {
     hud_text(
         commands,
         font,
-        "Move: left thumb    Look: drag right    FIRE to shoot    (Space = ready/stop, N = next)",
+        "Move: left thumb   Look: drag right   FIRE to shoot   RELOAD when low   (Space=ready/stop, R=reload, N=next)",
         15.0,
         Color::srgb(0.85, 0.88, 0.85),
         0.0,
@@ -356,7 +360,7 @@ fn gather_input(
     touches: Res<Touches>,
     windows: Query<&Window>,
     hud_cam: Query<(&Camera, &GlobalTransform), With<HudCam>>,
-    buttons: Query<(&Btn, &Transform)>,
+    buttons: Query<(&Btn, &Transform, &Sprite)>,
     mut controls: ResMut<Controls>,
     mut pad: ResMut<TouchPad>,
     mut m: ResMut<Match>,
@@ -393,9 +397,10 @@ fn gather_input(
             _ => {}
         }
     }
-    if (keys.just_pressed(KeyCode::KeyN) || keys.just_pressed(KeyCode::KeyR))
-        && m.phase != Phase::Running
-    {
+    if keys.just_pressed(KeyCode::KeyR) {
+        m.reload();
+    }
+    if keys.just_pressed(KeyCode::KeyN) && m.phase != Phase::Running {
         m.next_stage();
     }
 
@@ -407,13 +412,9 @@ fn gather_input(
     let _ = window;
 
     let hit_button = |world: Vec2| -> Option<Btn> {
-        for (btn, tf) in &buttons {
+        for (btn, tf, sprite) in &buttons {
             let c = tf.translation.truncate();
-            let half = if *btn == Btn::Fire {
-                Vec2::splat(FIRE_R)
-            } else {
-                Vec2::new(BTN_W, BTN_H) * 0.5
-            };
+            let half = sprite.custom_size.unwrap_or(Vec2::new(BTN_W, BTN_H)) * 0.5;
             if (world.x - c.x).abs() <= half.x && (world.y - c.y).abs() <= half.y {
                 return Some(*btn);
             }
@@ -426,6 +427,7 @@ fn gather_input(
         if let Some(btn) = hit_button(world) {
             match btn {
                 Btn::Fire if m.phase == Phase::Running => controls.fire = true,
+                Btn::Reload => m.reload(),
                 Btn::Ready if matches!(m.phase, Phase::Idle | Phase::Scored) => m.make_ready(),
                 Btn::Stop if m.phase == Phase::Running => m.stop(),
                 Btn::Next if m.phase != Phase::Running => m.next_stage(),
@@ -498,6 +500,13 @@ fn fire_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     if !controls.fire || m.phase != Phase::Running {
+        return;
+    }
+    if m.reloading {
+        return;
+    }
+    if m.ammo == 0 {
+        m.dry_fire(); // click on an empty chamber
         return;
     }
     let Ok(gt) = cam.single() else { return };
@@ -662,6 +671,12 @@ fn hud(
                 _ => String::new(),
             },
             HudKind::Status => m.status.clone(),
+            HudKind::Ammo => match m.phase {
+                Phase::Running if m.reloading => "RELOADING…".into(),
+                Phase::Running if m.ammo == 0 => "RELOAD! (R)".into(),
+                Phase::Running => format!("Ammo {} / {}", m.ammo, MAG_SIZE),
+                _ => String::new(),
+            },
         };
     }
     for (label, mut text) in &mut q.p1() {
@@ -670,6 +685,7 @@ fn hud(
             Btn::Stop => "STOP".into(),
             Btn::Next => "NEXT STAGE".into(),
             Btn::Fire => "FIRE".into(),
+            Btn::Reload => "RELOAD".into(),
         };
     }
     for (kind, mut sprite) in &mut btn_sprites {
@@ -717,7 +733,9 @@ fn result_text(s: &Score, stage_num: u32) -> String {
 fn btn_active(m: &Match, kind: Btn) -> bool {
     match kind {
         Btn::Ready => matches!(m.phase, Phase::Idle | Phase::Scored),
-        Btn::Stop | Btn::Fire => m.phase == Phase::Running,
+        Btn::Stop => m.phase == Phase::Running,
+        Btn::Fire => m.can_fire(),
+        Btn::Reload => m.phase == Phase::Running && !m.reloading && m.ammo < MAG_SIZE,
         Btn::Next => m.phase != Phase::Running,
     }
 }
@@ -731,6 +749,7 @@ fn button_color(kind: Btn, on: bool) -> Color {
         Btn::Stop => Color::srgb(0.78, 0.30, 0.26),
         Btn::Next => Color::srgb(0.30, 0.50, 0.78),
         Btn::Fire => Color::srgb(0.85, 0.45, 0.2),
+        Btn::Reload => Color::srgb(0.80, 0.70, 0.22),
     }
 }
 
