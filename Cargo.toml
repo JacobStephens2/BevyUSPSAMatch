@@ -1,0 +1,69 @@
+[package]
+name = "bevy_uspsa"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+rand = "0.8"
+# Base entry (no features) so the Bevy derive macros can locate the `bevy`
+# crate via proc-macro-crate. Per-platform features are layered on below.
+bevy = { version = "0.18.1", default-features = false }
+
+# Desktop: full Bevy defaults plus WAV decoding.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+bevy = { version = "0.18.1", default-features = true, features = ["wav"] }
+
+# Android: build without the default GameActivity backend so cargo-apk can use
+# NativeActivity. We re-enable only the pieces this 2D game needs.
+[target.'cfg(target_os = "android")'.dependencies]
+bevy = { version = "0.18.1", default-features = false, features = [
+    "std",
+    "async_executor",
+    "multi_threaded",
+    "android-native-activity",
+    "android_shared_stdcxx",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_log",
+    "bevy_asset",
+    "bevy_state",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+    "bevy_sprite_render",
+    "bevy_text",
+    "default_font",
+    "bevy_audio",
+    "wav",
+] }
+
+[package.metadata.android]
+package = "com.jacobstephens.uspsamatch"
+apk_name = "bevy-uspsa"
+build_targets = ["aarch64-linux-android"]
+# Launcher icons live in res/mipmap-*/ic_launcher.png (see make_icon.py).
+resources = "res"
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "Bevy USPSA"
+icon = "@mipmap/ic_launcher"
+
+[package.metadata.android.application.activity]
+orientation = "landscape"
+config_changes = "orientation|keyboardHidden|screenSize"
+
+# Self-signed dev keystore (regenerate with build_apk.sh if missing).
+[package.metadata.android.signing.release]
+path = "release.keystore"
+keystore_password = "android"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
