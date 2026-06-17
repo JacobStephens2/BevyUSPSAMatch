@@ -19,8 +19,14 @@ No art or audio assets.
 ## Controls
 
 - **Mobile:** left thumb = move, drag the right side of the screen = look,
-  **FIRE** button = shoot. The on-screen crosshair is where you'll hit.
-- **Desktop:** `WASD` = move, mouse = look, left-click = fire.
+  **FIRE** button = shoot, **RELOAD** button = reload. The crosshair is where
+  you'll hit.
+- **Desktop:** `WASD` = move, mouse = look, left-click = fire, `R` = reload.
+
+You carry a **10-round magazine** — you can't clear a stage on one mag, so
+reload when you run low. A reload takes ~1.8s and that time counts against your
+stage clock (just like real USPSA). An empty chamber dry-fires (click) instead
+of shooting.
 
 ## Scoring (USPSA Minor)
 
