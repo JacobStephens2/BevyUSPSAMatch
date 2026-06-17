@@ -20,6 +20,8 @@ pub enum Sfx {
     Clear,
     Reload,
     Empty,
+    Hurt,
+    Down,
 }
 
 #[derive(Resource)]
@@ -32,6 +34,8 @@ pub struct AudioAssets {
     clear: Handle<AudioSource>,
     reload: Handle<AudioSource>,
     empty: Handle<AudioSource>,
+    hurt: Handle<AudioSource>,
+    down: Handle<AudioSource>,
     pub music: Handle<AudioSource>,
 }
 
@@ -46,6 +50,8 @@ impl AudioAssets {
             Sfx::Clear => self.clear.clone(),
             Sfx::Reload => self.reload.clone(),
             Sfx::Empty => self.empty.clone(),
+            Sfx::Hurt => self.hurt.clone(),
+            Sfx::Down => self.down.clone(),
         }
     }
 }
@@ -61,6 +67,8 @@ pub fn build_audio_assets(sources: &mut Assets<AudioSource>) -> AudioAssets {
         clear: mk(clear()),
         reload: mk(reload()),
         empty: mk(empty()),
+        hurt: mk(hurt()),
+        down: mk(down()),
         music: mk(music()),
     }
 }
@@ -237,6 +245,36 @@ fn empty() -> Vec<f32> {
     let mut buf = vec![0.0; dur(0.05)];
     add_tone(&mut buf, 0, 2400.0, 0.03, 0.4, 120.0);
     noise_burst(&mut buf, 0, 0.03, 0.4, 0.1, 130.0);
+    buf
+}
+
+/// Player hit: a low impact thump with a quick downward pitch sweep.
+fn hurt() -> Vec<f32> {
+    let n = dur(0.28);
+    let mut buf = vec![0.0; n];
+    for i in 0..n {
+        let t = i as f32 / SAMPLE_RATE as f32;
+        let tn = i as f32 / n as f32;
+        let freq = 180.0 - 110.0 * tn.min(1.0);
+        let env = (-14.0 * t).exp();
+        buf[i] = 0.8 * env * (TAU * freq * t).sin();
+    }
+    noise_burst(&mut buf, 0, 0.05, 0.4, 0.2, 45.0);
+    buf
+}
+
+/// Outlaw down: a body-fall thud plus a short low groan.
+fn down() -> Vec<f32> {
+    let n = dur(0.5);
+    let mut buf = vec![0.0; n];
+    add_tone(&mut buf, 0, 138.0, 0.5, 0.4, 6.0); // groan
+    add_tone(&mut buf, 0, 92.0, 0.5, 0.3, 6.0);
+    for i in 0..dur(0.12) {
+        let t = i as f32 / SAMPLE_RATE as f32;
+        let freq = 90.0 - 45.0 * (t / 0.1).min(1.0);
+        buf[i] += 0.7 * (-18.0 * t).exp() * (TAU * freq * t).sin();
+    }
+    noise_burst(&mut buf, 0, 0.1, 0.15, 0.3, 9.0); // dust
     buf
 }
 
