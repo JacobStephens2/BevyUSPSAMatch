@@ -1,5 +1,6 @@
-//! A USPSA-style shooting stage: paper targets with A/C/D zones, steel poppers,
-//! no-shoots, a start buzzer + timer, and hit-factor scoring.
+//! The 3D USPSA match: a downrange array of paper/steel/no-shoot targets, a
+//! start-buzzer/timer phase machine, ray-cast shooting from the camera, and
+//! hit-factor scoring.
 //!
 //! Scoring is USPSA **Minor**: A = 5, C = 3, D = 1; each paper needs two scoring
 //! hits (best two count). A miss (unfilled required hit) or a standing steel is
@@ -9,9 +10,13 @@ use crate::audio::Sfx;
 use bevy::prelude::*;
 use rand::Rng;
 
-pub const PAPER_HW: f32 = 38.0;
-pub const PAPER_HH: f32 = 58.0;
-pub const STEEL_R: f32 = 34.0;
+// Target geometry, in metres. Paper/no-shoots are vertical rectangles whose
+// face normal points back toward the shooter (+Z); steel are vertical discs.
+pub const PAPER_HW: f32 = 0.23;
+pub const PAPER_HH: f32 = 0.30;
+pub const PAPER_Y: f32 = 1.42; // near eye height so a level aim hits centre
+pub const STEEL_R: f32 = 0.16;
+pub const STEEL_Y: f32 = 1.30;
 
 const PAPERS: usize = 5;
 const STEEL: usize = 3;
@@ -41,67 +46,64 @@ impl Zone {
     }
 }
 
-/// A bullet hole, stored relative to the target centre. `bad` = a no-shoot hit.
-#[derive(Clone, Copy)]
-pub struct Hole {
-    pub off: Vec2,
-    pub bad: bool,
-}
-
 #[derive(Clone)]
 pub struct Target {
     pub kind: TKind,
-    pub pos: Vec2,
+    /// Centre of the target face (its plane is z = center.z, normal +Z).
+    pub center: Vec3,
     pub hw: f32,
     pub hh: f32,
     pub hits: Vec<Zone>,
     pub ns_hits: u32,
     pub down: bool,
-    pub holes: Vec<Hole>,
 }
 
 impl Target {
-    fn new(kind: TKind, pos: Vec2) -> Self {
+    fn new(kind: TKind, center: Vec3) -> Self {
         let (hw, hh) = match kind {
             TKind::Steel => (STEEL_R, STEEL_R),
             _ => (PAPER_HW, PAPER_HH),
         };
         Target {
             kind,
-            pos,
+            center,
             hw,
             hh,
             hits: Vec::new(),
             ns_hits: 0,
             down: false,
-            holes: Vec::new(),
         }
     }
 
-    fn ext(&self) -> f32 {
-        self.hh.max(self.hw)
-    }
-
-    fn reset(&mut self) {
-        self.hits.clear();
-        self.holes.clear();
-        self.ns_hits = 0;
-        self.down = false;
-    }
-
-    /// If `p` lands on this target, the offset from centre, else None.
-    fn contains(&self, p: Vec2) -> Option<Vec2> {
-        let off = p - self.pos;
+    pub fn satisfied(&self) -> bool {
         match self.kind {
-            TKind::Steel => (off.length() <= self.hw).then_some(off),
-            _ => (off.x.abs() <= self.hw && off.y.abs() <= self.hh).then_some(off),
+            TKind::Paper => self.hits.len() >= 2,
+            TKind::Steel => self.down,
+            TKind::NoShoot => true,
         }
+    }
+
+    /// Ray (origin,dir) vs this target's vertical face. Returns (distance, local
+    /// offset from centre) if it hits the front of the face.
+    fn ray_hit(&self, origin: Vec3, dir: Vec3) -> Option<(f32, Vec2)> {
+        if dir.z >= -1.0e-4 {
+            return None; // pointing away from / parallel to the downrange faces
+        }
+        let t = (self.center.z - origin.z) / dir.z;
+        if t <= 0.0 {
+            return None;
+        }
+        let hit = origin + dir * t;
+        let off = Vec2::new(hit.x - self.center.x, hit.y - self.center.y);
+        let on = match self.kind {
+            TKind::Steel => off.length() <= self.hw,
+            _ => off.x.abs() <= self.hw && off.y.abs() <= self.hh,
+        };
+        on.then_some((t, off))
     }
 }
 
 fn paper_zone(off: Vec2, hw: f32, hh: f32) -> Zone {
-    // Chebyshev distance so the zones line up with the nested A/C/D rectangles
-    // drawn for the target.
     let d = (off.x / hw).abs().max((off.y / hh).abs());
     if d < 0.34 {
         Zone::A
@@ -134,11 +136,17 @@ pub struct Score {
     pub hit_factor: f32,
 }
 
+/// What a fired shot produced, for the renderer to place a bullet hole.
+pub struct ShotResult {
+    pub on_target: bool,
+    pub point: Vec3,
+    pub bad: bool,
+}
+
 #[derive(Resource)]
-pub struct Stage {
+pub struct Match {
     pub phase: Phase,
     pub targets: Vec<Target>,
-    pub bg_holes: Vec<Vec2>,
     pub wait_left: f32,
     pub elapsed: f32,
     pub shots: u32,
@@ -146,57 +154,61 @@ pub struct Stage {
     pub result: Option<Score>,
     pub status: String,
     pub pending: Vec<Sfx>,
-    pub dirty: bool,
+    /// Set when a new layout needs its meshes (re)spawned.
+    pub rebuild: bool,
+    /// Set when bullet holes should be cleared (new attempt).
+    pub clear_marks: bool,
 }
 
-impl Stage {
+impl Match {
     pub fn new() -> Self {
-        let mut s = Stage {
+        let mut m = Match {
             phase: Phase::Idle,
-            targets: Vec::new(),
-            bg_holes: Vec::new(),
+            targets: layout(),
             wait_left: 0.0,
             elapsed: 0.0,
             shots: 0,
             stage_num: 1,
             result: None,
-            status: String::new(),
+            status: "MAKE READY, wait for the buzzer, then move and shoot.".into(),
             pending: Vec::new(),
-            dirty: true,
+            rebuild: true,
+            clear_marks: false,
         };
-        s.targets = layout();
-        s.status = "Press MAKE READY, wait for the buzzer, then tap the targets.".into();
-        s
+        m.result = None;
+        m
     }
 
     pub fn next_stage(&mut self) {
+        if self.phase == Phase::Running {
+            return;
+        }
         self.stage_num += 1;
         self.targets = layout();
-        self.bg_holes.clear();
         self.result = None;
         self.phase = Phase::Idle;
         self.elapsed = 0.0;
         self.shots = 0;
-        self.status = "New stage. Press MAKE READY.".into();
-        self.dirty = true;
+        self.status = "New stage. MAKE READY.".into();
+        self.rebuild = true;
     }
 
-    /// Start the current stage fresh: clear hits and begin the random delay.
     pub fn make_ready(&mut self) {
-        if self.phase == Phase::Running || self.phase == Phase::Waiting {
+        if matches!(self.phase, Phase::Running | Phase::Waiting) {
             return;
         }
         for t in &mut self.targets {
-            t.reset();
+            t.hits.clear();
+            t.ns_hits = 0;
+            t.down = false;
         }
-        self.bg_holes.clear();
         self.result = None;
         self.shots = 0;
         self.elapsed = 0.0;
         self.wait_left = rand::thread_rng().gen_range(1.5..3.5);
         self.phase = Phase::Waiting;
         self.status = "Stand by…".into();
-        self.dirty = true;
+        self.clear_marks = true;
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -207,13 +219,12 @@ impl Stage {
                     self.phase = Phase::Running;
                     self.elapsed = 0.0;
                     self.pending.push(Sfx::Buzzer);
-                    self.status = "GO! Tap the targets.".into();
-                    self.dirty = true;
+                    self.status = "GO! Move and shoot.".into();
                 }
             }
             Phase::Running => {
                 self.elapsed += dt;
-                if self.all_engaged() {
+                if self.targets.iter().all(|t| t.satisfied()) {
                     self.score();
                 }
             }
@@ -221,46 +232,30 @@ impl Stage {
         }
     }
 
-    fn all_engaged(&self) -> bool {
-        self.targets.iter().all(|t| match t.kind {
-            TKind::Paper => t.hits.len() >= 2,
-            TKind::Steel => t.down,
-            TKind::NoShoot => true,
-        })
-    }
-
-    /// Register a shot at world position `p`. Only meaningful while running.
-    pub fn shoot(&mut self, p: Vec2) {
-        if self.phase != Phase::Running {
-            return;
-        }
+    /// Fire a ray from `origin` along `dir`; update scoring and return where to
+    /// draw the bullet hole.
+    pub fn shoot(&mut self, origin: Vec3, dir: Vec3) -> ShotResult {
         self.shots += 1;
         self.pending.push(Sfx::Shot);
-        self.dirty = true;
 
-        // topmost = the containing target whose centre is nearest the tap
-        let mut best: Option<(usize, Vec2)> = None;
+        let mut best: Option<(usize, f32, Vec2)> = None;
         for (i, t) in self.targets.iter().enumerate() {
-            if let Some(off) = t.contains(p) {
-                if best.is_none_or(|(_, bo)| off.length() < bo.length()) {
-                    best = Some((i, off));
+            if let Some((dist, off)) = t.ray_hit(origin, dir) {
+                if best.is_none_or(|(_, bd, _)| dist < bd) {
+                    best = Some((i, dist, off));
                 }
             }
         }
 
-        let Some((i, off)) = best else {
-            self.bg_holes.push(p);
-            if self.bg_holes.len() > 30 {
-                self.bg_holes.remove(0);
-            }
-            return;
+        let Some((i, dist, off)) = best else {
+            return ShotResult { on_target: false, point: origin + dir * 30.0, bad: false };
         };
+        let point = origin + dir * dist;
         let t = &mut self.targets[i];
+        let mut bad = false;
         match t.kind {
             TKind::Paper => {
-                let zone = paper_zone(off, t.hw, t.hh);
-                t.hits.push(zone);
-                t.holes.push(Hole { off, bad: false });
+                t.hits.push(paper_zone(off, t.hw, t.hh));
                 self.pending.push(Sfx::Paper);
             }
             TKind::Steel => {
@@ -271,10 +266,11 @@ impl Stage {
             }
             TKind::NoShoot => {
                 t.ns_hits += 1;
-                t.holes.push(Hole { off, bad: true });
+                bad = true;
                 self.pending.push(Sfx::Penalty);
             }
         }
+        ShotResult { on_target: true, point, bad }
     }
 
     pub fn stop(&mut self) {
@@ -292,7 +288,6 @@ impl Stage {
             match t.kind {
                 TKind::Paper => {
                     let mut hits = t.hits.clone();
-                    // best two scoring hits
                     hits.sort_by_key(|z| -z.points());
                     for z in hits.iter().take(2) {
                         s.points += z.points();
@@ -325,39 +320,36 @@ impl Stage {
         s.hit_factor = (s.points.max(0) as f32) / s.time;
         self.result = Some(s);
         self.phase = Phase::Scored;
-        self.status = format!(
-            "Stage {} complete — hit factor {:.2}",
-            self.stage_num, s.hit_factor
-        );
+        self.status = format!("Stage {} — hit factor {:.2}", self.stage_num, s.hit_factor);
         self.pending
             .push(if s.points > 0 { Sfx::Clear } else { Sfx::Penalty });
-        self.dirty = true;
     }
 }
 
-/// Lay out a fresh random stage, rejecting positions that crowd earlier targets.
+/// A random downrange layout: targets spread across x, set back in −z.
 fn layout() -> Vec<Target> {
     let mut rng = rand::thread_rng();
-    let mut targets: Vec<Target> = Vec::new();
+    let mut out: Vec<Target> = Vec::new();
     let plan = [
-        (TKind::Paper, PAPERS),
-        (TKind::Steel, STEEL),
-        (TKind::NoShoot, NOSHOOTS),
+        (TKind::Paper, PAPERS, PAPER_Y),
+        (TKind::Steel, STEEL, STEEL_Y),
+        (TKind::NoShoot, NOSHOOTS, PAPER_Y),
     ];
-    for (kind, count) in plan {
+    for (kind, count, y) in plan {
         for _ in 0..count {
             for _try in 0..300 {
-                let p = Vec2::new(rng.gen_range(-450.0..450.0), rng.gen_range(-40.0..300.0));
-                let cand = Target::new(kind, p);
-                let ok = targets
+                let x = rng.gen_range(-5.5..5.5);
+                let z = rng.gen_range(-11.0..-3.0);
+                let c = Vec3::new(x, y, z);
+                let ok = out
                     .iter()
-                    .all(|t| p.distance(t.pos) > (cand.ext() + t.ext() + 24.0).max(118.0));
+                    .all(|t| (t.center.x - x).abs() > 1.1 || (t.center.z - z).abs() > 1.1);
                 if ok {
-                    targets.push(cand);
+                    out.push(Target::new(kind, c));
                     break;
                 }
             }
         }
     }
-    targets
+    out
 }
